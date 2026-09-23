@@ -205,10 +205,20 @@ cleanup() { rm -rf "$TMPDIR_RUN"; }
 trap cleanup EXIT
 
 # ---------------------------------------------------------------------------
-# Credentials. macOS keeps them in the login Keychain; Linux normally keeps
+# Credentials seed. The container keeps its own login, persisted across runs
+# on the claude-code-sandbox-claude-dir-volume backing /home/node/.claude
+# (see docker-entrypoint.sh): it is a separate Anthropic session from the
+# host's, so a token refresh or a fresh login done inside the container can
+# actually be written back
+# (the host Keychain/file has no such write-back path, since the container
+# has no access to the macOS Keychain and any file mount is gone once the
+# --rm container exits). This extraction only ever seeds that volume once,
+# on its first-ever run when it's still empty; every run after that ignores
+# it and relies solely on the container's own persisted credentials.
+# macOS keeps host credentials in the login Keychain; Linux normally keeps
 # them in ~/.claude/.credentials.json (unless a system keyring is in use, in
-# which case there is nothing to copy and the user logs in inside the
-# container).
+# which case there is nothing to seed from and the user logs in inside the
+# container instead).
 # ---------------------------------------------------------------------------
 case "$OS" in
   Darwin)
@@ -280,11 +290,23 @@ MOUNT_ARGS=(-v "$PROJECT_DIR:$CONTAINER_WORKDIR$MOUNT_SUFFIX")
 # to the version baked into the image every time.
 MOUNT_ARGS+=(-v "claude-code-sandbox-volume:/home/node/.local")
 
+# Named volume backing /home/node/.claude itself, so that whatever Claude
+# Code writes there directly (chiefly .credentials.json, via a
+# temp-file-then-rename that must land on a real, persistent filesystem
+# entry rather than through a symlink, see docker-entrypoint.sh) survives
+# across --rm containers, independent of the host's own credentials. Host
+# entries are still bind-mounted individually on top of it below, same as
+# before; a named volume as the base is not the "different host source over
+# an existing bind mount" case virtiofs rejects, since it's not a bind mount
+# from the host at all.
+MOUNT_ARGS+=(-v "claude-code-sandbox-claude-dir-volume:/home/node/.claude")
+
 # Mount each entry of ~/.claude individually (siblings), instead of the whole
 # directory: Docker Desktop's virtiofs backend cannot mount a path from a
 # different host source on top of a path already covered by another bind
 # mount, so settings.json/.credentials.json can't be overlaid on a single
-# whole-directory mount of ~/.claude.
+# whole-directory bind mount of ~/.claude sourced from the host. (This is
+# unrelated to the volume mount above, which is not a host bind mount.)
 if [ -d "$CLAUDE_DIR_SRC" ]; then
   shopt -s nullglob dotglob
   for entry in "$CLAUDE_DIR_SRC"/*; do
@@ -300,7 +322,7 @@ else
 fi
 
 append_mount_if_file "$CLAUDE_DIR_SRC/settings.json" "/home/node/.claude/settings.json" "ro"
-append_mount_if_file "$CREDS_TMP" "/home/node/.claude/.credentials.json" "ro"
+append_mount_if_file "$CREDS_TMP" "/home/node/.claude-host-credentials-seed.json" "ro"
 append_mount_if_file "$HOME/.claude.json" "/home/node/.claude.json"
 
 # Carry the host git identity and aliases into the container. A filtered copy

@@ -29,15 +29,22 @@ fi
 
 CONTAINER_VERSION="$(claude --version 2>/dev/null | awk '{print $1}')"
 
-# HOST_CLAUDE_VERSION is set by claude.sh from the native host install.
-# Only update when the container is strictly behind it: a fresh container
-# must not drift ahead of whatever version the host is currently on.
-if [ -n "${HOST_CLAUDE_VERSION:-}" ] && [ "$CONTAINER_VERSION" != "$HOST_CLAUDE_VERSION" ]; then
-  OLDER_VERSION="$(printf '%s\n%s\n' "$CONTAINER_VERSION" "$HOST_CLAUDE_VERSION" | sort -V | head -1)"
-  if [ "$OLDER_VERSION" = "$CONTAINER_VERSION" ]; then
-    echo "Updating claude ($CONTAINER_VERSION -> $HOST_CLAUDE_VERSION)..." >&2
-    claude update || echo "Warning: claude update failed; continuing with existing version ($CONTAINER_VERSION)" >&2
+# HOST_CLAUDE_VERSION is set by claude.sh from the native host install, when
+# there is one. If so, only update when the container is strictly behind it:
+# a fresh container must not drift ahead of whatever version the host is
+# currently on. Without a native host install to track (HOST_CLAUDE_VERSION
+# empty, e.g. claude is only ever used sandboxed), there is nothing to stay
+# in sync with, so just self-update to latest instead.
+if [ -n "${HOST_CLAUDE_VERSION:-}" ]; then
+  if [ "$CONTAINER_VERSION" != "$HOST_CLAUDE_VERSION" ]; then
+    OLDER_VERSION="$(printf '%s\n%s\n' "$CONTAINER_VERSION" "$HOST_CLAUDE_VERSION" | sort -V | head -1)"
+    if [ "$OLDER_VERSION" = "$CONTAINER_VERSION" ]; then
+      echo "Updating claude ($CONTAINER_VERSION -> $HOST_CLAUDE_VERSION)..." >&2
+      claude update || echo "Warning: claude update failed; continuing with existing version ($CONTAINER_VERSION)" >&2
+    fi
   fi
+else
+  claude update || echo "Warning: claude self-update failed; continuing with existing version ($CONTAINER_VERSION)" >&2
 fi
 
 exec claude "$@"

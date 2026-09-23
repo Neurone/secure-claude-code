@@ -55,12 +55,28 @@ if [ -d "$SHIM_DIR" ]; then
   SHIM_DIR_REAL="$(cd "$SHIM_DIR" && pwd -P)"
 fi
 
+# A native 'claude' is optional: claude.sh only uses it, when present, to seed
+# the container's first-ever login and to keep the container's version from
+# drifting ahead of it (see claude.sh / docker-entrypoint.sh). Without one,
+# the sandboxed 'claude' still works standalone: it logs in and self-updates
+# on its own inside the container.
+if NATIVE_CLAUDE_PATH="$(find_native_claude "$SHIM_DIR_REAL")"; then
+  HAVE_NATIVE_CLAUDE=1
+else
+  HAVE_NATIVE_CLAUDE=0
+fi
+
 # Already fully installed: report and exit without touching anything.
 if [ -L "$SHIM_CLAUDE" ] && [ "$(resolve_path "$SHIM_CLAUDE")" = "$WRAPPER_REAL" ] \
-   && [ -L "$SHIM_CLAUDE_ORIGINAL" ] && any_rc_has_path_block; then
+   && { [ "$HAVE_NATIVE_CLAUDE" -eq 0 ] || [ -L "$SHIM_CLAUDE_ORIGINAL" ]; } \
+   && any_rc_has_path_block; then
   echo "Already installed:"
   echo "  $SHIM_CLAUDE -> $WRAPPER_SCRIPT"
-  echo "  $SHIM_CLAUDE_ORIGINAL -> $(readlink "$SHIM_CLAUDE_ORIGINAL")"
+  if [ -L "$SHIM_CLAUDE_ORIGINAL" ]; then
+    echo "  $SHIM_CLAUDE_ORIGINAL -> $(readlink "$SHIM_CLAUDE_ORIGINAL")"
+  else
+    echo "  No native 'claude' on PATH; $SHIM_CLAUDE_ORIGINAL was not created (not needed by the sandboxed 'claude')."
+  fi
   echo "PATH entry already present in shell startup files."
   rebuild_sandbox_image "$DOCKERFILE" "$CONTAINER_DIR"
   exit 0
@@ -76,21 +92,19 @@ if [ -e "$SHIM_CLAUDE_ORIGINAL" ] && [ ! -L "$SHIM_CLAUDE_ORIGINAL" ]; then
   exit 1
 fi
 
-if ! NATIVE_CLAUDE_PATH="$(find_native_claude "$SHIM_DIR_REAL")"; then
-  echo "Error: no native 'claude' command found in PATH (outside of $SHIM_DIR)." >&2
-  echo "Install the native Claude Code CLI first, then re-run this script." >&2
-  exit 1
-fi
-
 if ! mkdir -p "$SHIM_DIR" 2>/dev/null; then
   echo "Error: could not create $SHIM_DIR. Check permissions on $HOME." >&2
   exit 1
 fi
 
-echo "Found native claude at: $NATIVE_CLAUDE_PATH"
-
-ln -sf "$NATIVE_CLAUDE_PATH" "$SHIM_CLAUDE_ORIGINAL"
-echo "  -> linked: $SHIM_CLAUDE_ORIGINAL -> $NATIVE_CLAUDE_PATH"
+if [ "$HAVE_NATIVE_CLAUDE" -eq 1 ]; then
+  echo "Found native claude at: $NATIVE_CLAUDE_PATH"
+  ln -sf "$NATIVE_CLAUDE_PATH" "$SHIM_CLAUDE_ORIGINAL"
+  echo "  -> linked: $SHIM_CLAUDE_ORIGINAL -> $NATIVE_CLAUDE_PATH"
+else
+  echo "No native 'claude' command found in PATH (outside of $SHIM_DIR); skipping $SHIM_CLAUDE_ORIGINAL."
+  echo "The sandboxed 'claude' does not need it: it logs in and self-updates inside the container."
+fi
 
 ln -sf "$WRAPPER_SCRIPT" "$SHIM_CLAUDE"
 echo "  -> linked: $SHIM_CLAUDE -> $WRAPPER_SCRIPT"
@@ -105,13 +119,27 @@ configure_shell_path
 
 rebuild_sandbox_image "$DOCKERFILE" "$CONTAINER_DIR"
 
-cat <<EOF
+if [ "$HAVE_NATIVE_CLAUDE" -eq 1 ]; then
+  cat <<EOF
 
 Install complete. The native claude install at $NATIVE_CLAUDE_PATH is untouched,
 so its own updates keep working normally.
 
   $SHIM_CLAUDE          -> $WRAPPER_SCRIPT (sandboxed, runs in Docker)
   $SHIM_CLAUDE_ORIGINAL -> $NATIVE_CLAUDE_PATH (native binary)
+EOF
+else
+  cat <<EOF
+
+Install complete. No native 'claude' was found, so only the sandbox wrapper
+was installed; the sandboxed 'claude' logs in and self-updates on its own
+inside the container.
+
+  $SHIM_CLAUDE -> $WRAPPER_SCRIPT (sandboxed, runs in Docker)
+EOF
+fi
+
+cat <<EOF
 
 Start a new shell (or run 'source <rc file>' / 'export PATH="$SHIM_DIR:\$PATH"') for
 'claude' to resolve to the sandbox wrapper in your current session.

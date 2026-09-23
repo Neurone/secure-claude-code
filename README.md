@@ -19,6 +19,9 @@ Each run is also disposable and reproducible: `--rm` plus a pinned toolchain (`s
 - `bash`
 - `jq` (used to read hook scripts out of `~/.claude/settings.json` so they can be mounted into the container)
 - [Docker](https://docs.docker.com/get-docker/)
+
+### Optional
+
 - Claude Code installed natively is optional. If `claude` is already on `PATH`, `install.sh` links it as `claude-original` and the sandboxed `claude` stays version-matched with it and seeds its first login from it. Without one, the sandboxed `claude` still works fully standalone: it logs in and self-updates on its own inside the container.
 
 ## Install

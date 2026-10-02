@@ -35,7 +35,7 @@ fi
 rm -f "$SHIM_CLAUDE"
 echo "Removed: $SHIM_CLAUDE"
 
-if [ -e "$SHIM_CLAUDE_ORIGINAL" ]; then
+if [ -e "$SHIM_CLAUDE_ORIGINAL" ] || [ -L "$SHIM_CLAUDE_ORIGINAL" ]; then
   rm -f "$SHIM_CLAUDE_ORIGINAL"
   echo "Removed: $SHIM_CLAUDE_ORIGINAL"
 fi
@@ -49,6 +49,16 @@ if [ -d "$SHIM_DIR" ] && [ -z "$(ls -A "$SHIM_DIR")" ]; then
     rmdir "$SHIM_PARENT_DIR"
     echo "Removed empty directory: $SHIM_PARENT_DIR"
   fi
+fi
+
+SAVED_CLAUDE_JSON="$SECURE_CLAUDE_HOME_DIR/claude.json"
+if [ -f "$SAVED_CLAUDE_JSON" ]; then
+  echo "Kept: $SAVED_CLAUDE_JSON (Claude Code state saved by the sandbox; delete it manually if you don't need it)"
+fi
+
+SAVED_SETTINGS_MOUNT_MODE="$SECURE_CLAUDE_HOME_DIR/settings-mount-mode"
+if [ -f "$SAVED_SETTINGS_MOUNT_MODE" ]; then
+  echo "Kept: $SAVED_SETTINGS_MOUNT_MODE (remembered answer for the settings.json mount-mode prompt; delete it manually to be asked again next install)"
 fi
 
 echo "Removing PATH entry..."

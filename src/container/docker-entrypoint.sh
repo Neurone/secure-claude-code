@@ -20,11 +20,36 @@ set -e
 # rename() onto a symlink path replaces the symlink itself with a regular
 # file rather than writing through it, so the save landed in the
 # container's ephemeral layer and vanished on the next --rm.
-CREDENTIALS_FILE="/home/node/.claude/.credentials.json"
-CREDENTIALS_SEED_FILE="/home/node/.claude-host-credentials-seed.json"
+CREDENTIALS_FILE="${HOME:?}/.claude/.credentials.json"
+CREDENTIALS_SEED_FILE="${HOME:?}/.claude-host-credentials-seed.json"
 
 if [ ! -f "$CREDENTIALS_FILE" ] && [ -f "$CREDENTIALS_SEED_FILE" ]; then
   install -m 600 "$CREDENTIALS_SEED_FILE" "$CREDENTIALS_FILE"
+fi
+
+# Same seed-once pattern as credentials just above, for the same reason: when
+# claude.sh's resolve_settings_mount_mode chose "rw", settings.json is
+# writable from inside the container, but it can't be a live bind mount of
+# the host file, since Claude Code saves it via a temp-file-then-rename and
+# rename(2) onto an active bind-mount point fails with EBUSY (confirmed: it
+# silently breaks model/effort selection, while simpler flag toggles like
+# autoCompactEnabled apparently use a different, non-atomic write and still
+# go through). So claude.sh instead mounts the host file read-only at
+# SETTINGS_SEED_FILE, and it is copied into the real, volume-backed
+# settings.json here, once: after that the container's own copy is
+# authoritative and safely renameable, independent of the host's (same
+# divergence as the login above).
+SETTINGS_FILE="${HOME:?}/.claude/settings.json"
+SETTINGS_SEED_FILE="${HOME:?}/.claude-host-settings-seed.json"
+
+if [ ! -f "$SETTINGS_FILE" ] && [ -f "$SETTINGS_SEED_FILE" ]; then
+  install -m 644 "$SETTINGS_SEED_FILE" "$SETTINGS_FILE"
+fi
+
+# Only this script knows whether the volume already holds a login: claude.sh
+# just passes along a seed when the host happens to have credentials.
+if [ ! -f "$CREDENTIALS_FILE" ]; then
+  echo "No saved login found: sign in inside the container; it will be remembered for the next runs." >&2
 fi
 
 CONTAINER_VERSION="$(claude --version 2>/dev/null | awk '{print $1}')"

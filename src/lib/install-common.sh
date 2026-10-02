@@ -11,7 +11,8 @@
 # PATH, it always wins over whatever the native install currently looks
 # like, regardless of what the auto-updater does to it.
 
-SECURE_CLAUDE_SHIM_DIR="$HOME/.secure-claude-code/bin"
+SECURE_CLAUDE_HOME_DIR="$HOME/.secure-claude-code"
+SECURE_CLAUDE_SHIM_DIR="$SECURE_CLAUDE_HOME_DIR/bin"
 SECURE_CLAUDE_IMAGE_NAME="claude-code-sandbox"
 
 SECURE_CLAUDE_RC_FILES=(

@@ -53,6 +53,28 @@ append_mount_if_file() {
   fi
 }
 
+# Creates the file with the given content unless it already exists. The
+# content is written to a temp file and hard-linked into place: ln fails if
+# the target exists, so concurrent wrappers can never truncate each other's
+# file, and the first writer wins.
+ensure_file_with_content() {
+  local target_path="$1"
+  local initial_content="$2"
+  local temp_path
+
+  [ -f "$target_path" ] && return 0
+
+  mkdir -p "$(dirname "$target_path")"
+  temp_path="$(mktemp "$target_path.XXXXXX")"
+  printf '%s\n' "$initial_content" > "$temp_path"
+  if ! ln "$temp_path" "$target_path" 2>/dev/null && [ ! -f "$target_path" ]; then
+    rm -f "$temp_path"
+    echo "Error: could not create $target_path" >&2
+    return 1
+  fi
+  rm -f "$temp_path"
+}
+
 # Every hook script referenced by settings.json's "command" hooks must be
 # reachable at the same absolute path inside the container, since that's the
 # path Claude Code will invoke. Paths already under $CLAUDE_DIR_SRC or
@@ -137,6 +159,65 @@ fi
 # shellcheck source=lib/install-common.sh
 source "$INSTALL_COMMON"
 
+# Whether $CLAUDE_DIR_SRC/settings.json is bind-mounted read-only or writable
+# when a native claude manages it (see resolve_settings_mount_mode below) is
+# remembered here after the first answer, so the question is only ever asked
+# once. Delete this file to be asked again on the next run.
+SETTINGS_MOUNT_MODE_FILE="$SECURE_CLAUDE_HOME_DIR/settings-mount-mode"
+
+# Decides whether the host's settings.json is mounted "ro" (default: the
+# native claude stays the sole owner) or "rw" (lets changes made inside the
+# container persist, at the cost of the container being able to modify
+# settings the native claude also uses). A saved answer in
+# $SETTINGS_MOUNT_MODE_FILE short-circuits the prompt entirely. Otherwise,
+# only asked when stdin is a terminal: a non-interactive invocation (a
+# script, CI, the test suite) must never block on a prompt, so it silently
+# keeps the safe read-only default instead.
+resolve_settings_mount_mode() {
+  local saved_mode answer
+
+  if [ -f "$SETTINGS_MOUNT_MODE_FILE" ]; then
+    saved_mode="$(<"$SETTINGS_MOUNT_MODE_FILE")"
+    case "$saved_mode" in
+      ro | rw)
+        printf '%s\n' "$saved_mode"
+        return 0
+        ;;
+    esac
+  fi
+
+  if [ ! -t 0 ]; then
+    printf 'ro\n'
+    return 0
+  fi
+
+  echo "WARNING: a native claude install is managing $CLAUDE_DIR_SRC/settings.json." >&2
+  echo "For this reason, it will be mounted read-only and changes to the settings made inside the container will be lost." >&2
+  echo "" >&2
+  read -r -p "Mount the settings file writable instead, so changes persist across restart? [y/N/always-yes/always-no]: " answer
+
+  case "$answer" in
+    always-yes)
+      mkdir -p "$SECURE_CLAUDE_HOME_DIR"
+      printf 'rw\n' > "$SETTINGS_MOUNT_MODE_FILE"
+      echo "Saved: settings.json will be mounted writable from now on. Delete $SETTINGS_MOUNT_MODE_FILE to be asked again." >&2
+      printf 'rw\n'
+      ;;
+    always-no)
+      mkdir -p "$SECURE_CLAUDE_HOME_DIR"
+      printf 'ro\n' > "$SETTINGS_MOUNT_MODE_FILE"
+      echo "Saved: settings.json will be mounted read-only from now on. Delete $SETTINGS_MOUNT_MODE_FILE to be asked again." >&2
+      printf 'ro\n'
+      ;;
+    [Yy] | [Yy][Ee][Ss])
+      printf 'rw\n'
+      ;;
+    *)
+      printf 'ro\n'
+      ;;
+  esac
+}
+
 OS="$(uname -s)"
 
 if [ ! -f "$DOCKERFILE" ]; then
@@ -174,7 +255,11 @@ fi
 SELF_REAL="$(resolve_path "${BASH_SOURCE[0]}")"
 HOST_CLAUDE_VERSION=""
 if HOST_CLAUDE_PATH="$(find_host_claude_binary "$SELF_REAL")"; then
-  HOST_CLAUDE_VERSION="$($HOST_CLAUDE_PATH --version 2>/dev/null | awk '{print $1}')"
+  if host_version_output="$("$HOST_CLAUDE_PATH" --version 2>/dev/null)"; then
+    HOST_CLAUDE_VERSION="${host_version_output%% *}"
+  else
+    echo "Warning: could not read the host claude version from $HOST_CLAUDE_PATH; the container will self-update instead" >&2
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -218,7 +303,8 @@ trap cleanup EXIT
 # macOS keeps host credentials in the login Keychain; Linux normally keeps
 # them in ~/.claude/.credentials.json (unless a system keyring is in use, in
 # which case there is nothing to seed from and the user logs in inside the
-# container instead).
+# container instead). A missing seed is not reported here: only the
+# container's entrypoint knows whether its volume already holds a login.
 # ---------------------------------------------------------------------------
 case "$OS" in
   Darwin)
@@ -226,15 +312,11 @@ case "$OS" in
       chmod 600 "$CREDS_TMP"
     else
       rm -f "$CREDS_TMP"
-      echo "Warning: no credentials found in Keychain for 'Claude Code-credentials'; you'll need to log in inside the container" >&2
     fi
     ;;
   *)
     if [ -f "$CLAUDE_DIR_SRC/.credentials.json" ]; then
       install -m 600 "$CLAUDE_DIR_SRC/.credentials.json" "$CREDS_TMP"
-    else
-      rm -f "$CREDS_TMP"
-      echo "Warning: no $CLAUDE_DIR_SRC/.credentials.json found; you'll need to log in inside the container" >&2
     fi
     ;;
 esac
@@ -321,9 +403,49 @@ else
   echo "Warning: $CLAUDE_DIR_SRC not found, container will start with an empty ~/.claude" >&2
 fi
 
-append_mount_if_file "$CLAUDE_DIR_SRC/settings.json" "/home/node/.claude/settings.json" "ro"
+# A native claude owns the host settings.json, so by default the container
+# only reads it (see resolve_settings_mount_mode). Without a native install
+# nothing else manages it, and the container must be able to change settings
+# itself: mount it writable (or, if there is none, leave the volume's own
+# copy in charge).
+#
+# The "writable" case can NOT be a live bind mount of the host file straight
+# onto /home/node/.claude/settings.json, even though that's what it sounds
+# like: Claude Code saves settings via a temp-file-then-rename, the same
+# atomic pattern noted for .credentials.json below, and rename(2) onto an
+# active bind-mount point fails with EBUSY. That silently breaks every
+# settings write that goes through that path (confirmed: model/effort
+# selection does, simple flag toggles like autoCompactEnabled apparently
+# don't, hence some settings "stick" from inside the container and some
+# don't). So "writable" is handled exactly like the credentials seed below
+# instead: the host file is mounted read-only at a side path and
+# docker-entrypoint.sh copies it into the (volume-backed, not bind-mounted)
+# settings.json the first time only, after which the container's own copy on
+# the persistent .claude volume is authoritative and safely renameable. This
+# means a container allowed to write settings.json diverges from the host's
+# copy after that first seed, same as the independent login described above.
+SETTINGS_MOUNT_MODE="ro"
+if [ -z "$HOST_CLAUDE_PATH" ]; then
+  SETTINGS_MOUNT_MODE=""
+elif [ -f "$CLAUDE_DIR_SRC/settings.json" ]; then
+  SETTINGS_MOUNT_MODE="$(resolve_settings_mount_mode)"
+fi
+if [ "$SETTINGS_MOUNT_MODE" = "rw" ]; then
+  append_mount_if_file "$CLAUDE_DIR_SRC/settings.json" "/home/node/.claude-host-settings-seed.json" "ro"
+else
+  append_mount_if_file "$CLAUDE_DIR_SRC/settings.json" "/home/node/.claude/settings.json" "$SETTINGS_MOUNT_MODE"
+fi
 append_mount_if_file "$CREDS_TMP" "/home/node/.claude-host-credentials-seed.json" "ro"
-append_mount_if_file "$HOME/.claude.json" "/home/node/.claude.json"
+
+# ~/.claude.json holds onboarding, theme and per-project state. Without a
+# host copy it would live in the container's throwaway layer and be lost on
+# every run, so a file kept in this tool's own directory stands in for it.
+CLAUDE_JSON_SRC="$HOME/.claude.json"
+if [ ! -f "$CLAUDE_JSON_SRC" ]; then
+  CLAUDE_JSON_SRC="$SECURE_CLAUDE_HOME_DIR/claude.json"
+  ensure_file_with_content "$CLAUDE_JSON_SRC" "{}"
+fi
+append_mount_if_file "$CLAUDE_JSON_SRC" "/home/node/.claude.json"
 
 # Carry the host git identity and aliases into the container. A filtered copy
 # is mounted rather than the original: credential helpers configured on the
@@ -351,15 +473,19 @@ build_company_announcement
 IFS=$'\n' COMPANY_ANNOUNCEMENT="${ANNOUNCEMENT_LINES[*]}"
 unset IFS
 
+# Only set when the script exists on the host: it comes from a personal
+# ~/.claude/customizations directory that a fresh host does not have.
+STATUSLINE_SCRIPT_SUBPATH="customizations/custom-claude-code-settings/bin/statusline-command.sh"
+STATUSLINE_COMMAND=""
+if [ -f "$CLAUDE_DIR_SRC/$STATUSLINE_SCRIPT_SUBPATH" ]; then
+  STATUSLINE_COMMAND="/home/node/.claude/$STATUSLINE_SCRIPT_SUBPATH"
+fi
+
 CONTAINER_SETTINGS="$(jq -n \
   --arg announcement "$COMPANY_ANNOUNCEMENT" \
-  '{
-    companyAnnouncements: [$announcement],
-    statusLine: {
-      type: "command",
-      command: "/home/node/.claude/customizations/custom-claude-code-settings/bin/statusline-command.sh"
-    }
-  }')"
+  --arg statusline_command "$STATUSLINE_COMMAND" \
+  '{ companyAnnouncements: [$announcement] }
+   + (if $statusline_command == "" then {} else { statusLine: { type: "command", command: $statusline_command } } end)')"
 
 # --user keeps files created in the project mount owned by the invoking user
 # (which matters on Linux, where there is no UID remapping layer).
@@ -374,8 +500,8 @@ docker run -it --rm \
   -e ANTHROPIC_API_KEY \
   -e ANTHROPIC_MODEL \
   -e HOST_CLAUDE_VERSION="$HOST_CLAUDE_VERSION" \
-  "${TZ_ARGS[@]}" \
-  "${CA_BUNDLE_ARGS[@]}" \
+  ${TZ_ARGS[@]+"${TZ_ARGS[@]}"} \
+  ${CA_BUNDLE_ARGS[@]+"${CA_BUNDLE_ARGS[@]}"} \
   "$SECURE_CLAUDE_IMAGE_NAME" \
   --settings "$CONTAINER_SETTINGS" \
   "$@"

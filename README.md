@@ -1,5 +1,9 @@
 # Secure Claude Code
 
+| ⚠️ WARNING ⚠️ |
+| --- |
+| USE [SECURE AI](https://github.com/Neurone/secure-ai) INSTEAD OF THIS REPOSITORY. THIS REPOSITORY REMAINS HERE SOLELY FOR ARCHIVAL PURPOSES. |
+
 Runs [Claude Code](https://claude.com/claude-code) inside a Docker sandbox instead of directly on the host, while still behaving like a normal `claude` install: same `~/.claude` config, same git identity (no credentials), same shell workflow. It works standalone, with no native Claude Code install required — see [Requirements](#requirements).
 
 ## Why
